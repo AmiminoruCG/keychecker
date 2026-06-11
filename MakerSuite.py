@@ -2,12 +2,7 @@ import random
 import APIKey
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-TEXT_CHECK_MODELS = (
-    "gemini-3.5-flash",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-3.1-flash-lite",
-)
+ALIVE_CHECK_MODEL = "gemini-2.5-pro"
 TTS_TIER_MODEL = "gemini-2.5-pro-preview-tts"
 IMAGEN_BILLING_MODEL = "imagen-4.0-generate-001"
 
@@ -35,23 +30,11 @@ def normalize_model_name(model_name):
     return model_name.replace("models/", "").replace("-latest", "")
 
 
-def choose_text_check_model(models):
-    model_names = {normalize_model_name(model.get("name", "")) for model in models}
-    for model_name in TEXT_CHECK_MODELS:
-        if model_name in model_names:
-            return model_name
-    for model in models:
-        methods = model.get("supportedGenerationMethods", [])
-        if "generateContent" in methods:
-            return normalize_model_name(model.get("name", ""))
-    return TEXT_CHECK_MODELS[0]
-
-
 async def check_makersuite(key: APIKey, session):
     async with session.get(f"{GEMINI_API_BASE}/models", headers=gemini_headers(key)) as response:
         resp_json = await response_json(response)
         models = resp_json.get("models", [])
-        if response.status != 200 or not await test_key_alive(key, session, choose_text_check_model(models)):
+        if response.status != 200 or not await test_key_alive(key, session):
             return
         key.enabled_billing = await test_makersuite_billing(key, session)
         model_names = {normalize_model_name(model.get("name", "")) for model in models}
@@ -63,19 +46,10 @@ async def check_makersuite(key: APIKey, session):
         return True
 
 
-async def test_key_alive(key: APIKey, session, model):
-    data = {
-        "contents": [{
-            "parts": [{"text": "ping"}]
-        }],
-        "generationConfig": {
-            "maxOutputTokens": 1,
-        },
-    }
-    async with session.post(f"{GEMINI_API_BASE}/models/{model}:generateContent", headers=gemini_headers(key), json=data) as response:
+async def test_key_alive(key: APIKey, session):
+    data = {"generationConfig": {"max_output_tokens": 0}}
+    async with session.post(f"{GEMINI_API_BASE}/models/{ALIVE_CHECK_MODEL}:generateContent", headers=gemini_headers(key), json=data) as response:
         resp_json = await response_json(response)
-        if response.status == 200:
-            return True
         if response.status == 429:
             error_details = resp_json.get("error", {}).get("message", "")
             # different type of 429 error compared to hitting the rpm limit, keys with this seem to never recover and are just perma 429'd, so we mark them as invalid
@@ -83,8 +57,7 @@ async def test_key_alive(key: APIKey, session, model):
                 return False
             if any(violation.get("quotaValue") == "0" for violation in quota_violations(resp_json)):
                 return False
-            return True
-        return False
+        return response.status in (200, 400, 429)
 
 
 def quota_violations(resp_json):
@@ -103,8 +76,6 @@ def infer_tier_from_violations(violations):
             return "Tier 2"
         if "tier_1" in quota_text or "tier1" in quota_text or "paid_tier" in quota_text:
             return "Tier 1"
-        if "free_tier" in quota_text or "freetier" in quota_text:
-            return "Free Tier"
     return ""
 
 
