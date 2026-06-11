@@ -1,18 +1,61 @@
 import random
 import APIKey
 
-gemmy_ultra = "gemini-1.0-ultra"
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+TEXT_CHECK_MODELS = (
+    "gemini-3.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
+)
+TTS_TIER_MODEL = "gemini-2.5-pro-preview-tts"
+IMAGEN_BILLING_MODEL = "imagen-4.0-generate-001"
+
+tracked_models = {
+    "gemini-3.5-flash": "has 3.5 flash",
+    "gemini-2.5-pro": "has 2.5 pro",
+    "gemini-3.1-flash-tts-preview": "has 3.1 tts",
+    "gemini-2.5-pro-preview-tts": "has 2.5 pro tts",
+    "imagen-4.0-generate-001": "has imagen 4",
+}
+
+
+def gemini_headers(key: APIKey):
+    return {"x-goog-api-key": key.api_key}
+
+
+async def response_json(response):
+    try:
+        return await response.json()
+    except Exception:
+        return {}
+
+
+def normalize_model_name(model_name):
+    return model_name.replace("models/", "").replace("-latest", "")
+
+
+def choose_text_check_model(models):
+    model_names = {normalize_model_name(model.get("name", "")) for model in models}
+    for model_name in TEXT_CHECK_MODELS:
+        if model_name in model_names:
+            return model_name
+    for model in models:
+        methods = model.get("supportedGenerationMethods", [])
+        if "generateContent" in methods:
+            return normalize_model_name(model.get("name", ""))
+    return TEXT_CHECK_MODELS[0]
 
 
 async def check_makersuite(key: APIKey, session):
-    async with session.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={key.api_key}") as response:
-        if response.status != 200 or not await test_key_alive(key, session):
+    async with session.get(f"{GEMINI_API_BASE}/models", headers=gemini_headers(key)) as response:
+        resp_json = await response_json(response)
+        models = resp_json.get("models", [])
+        if response.status != 200 or not await test_key_alive(key, session, choose_text_check_model(models)):
             return
         key.enabled_billing = await test_makersuite_billing(key, session)
-        response_json = await response.json()
-        model_names = [model['name'].replace('models/', '').replace('-latest', '') for model in response_json['models']]
-        if gemmy_ultra in model_names:
-            key.models.append(gemmy_ultra)
+        model_names = {normalize_model_name(model.get("name", "")) for model in models}
+        key.models.extend(model for model in tracked_models if model in model_names)
         if key.enabled_billing:
             await test_key_tier(key, session)
         else:
@@ -20,16 +63,57 @@ async def check_makersuite(key: APIKey, session):
         return True
 
 
-async def test_key_alive(key: APIKey, session):
-    data = {"generationConfig": {"max_output_tokens": 0}}
-    async with session.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key={key.api_key}", json=data) as response:
-        resp_json = await response.json()
+async def test_key_alive(key: APIKey, session, model):
+    data = {
+        "contents": [{
+            "parts": [{"text": "ping"}]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": 1,
+        },
+    }
+    async with session.post(f"{GEMINI_API_BASE}/models/{model}:generateContent", headers=gemini_headers(key), json=data) as response:
+        resp_json = await response_json(response)
+        if response.status == 200:
+            return True
         if response.status == 429:
-            error_details = resp_json.get('error', {}).get('message', '')
+            error_details = resp_json.get("error", {}).get("message", "")
             # different type of 429 error compared to hitting the rpm limit, keys with this seem to never recover and are just perma 429'd, so we mark them as invalid
             if "limit 'GenerateContent request limit per minute for a region' of service 'generativelanguage.googleapis.com' for consumer" in error_details:
                 return False
-        return True
+            if any(violation.get("quotaValue") == "0" for violation in quota_violations(resp_json)):
+                return False
+            return True
+        return False
+
+
+def quota_violations(resp_json):
+    violations = []
+    for detail in resp_json.get("error", {}).get("details", []):
+        violations.extend(detail.get("violations", []))
+    return violations
+
+
+def infer_tier_from_violations(violations):
+    for violation in violations:
+        quota_text = " ".join(str(violation.get(field, "")).lower() for field in ("quotaMetric", "quotaId"))
+        if "tier_3" in quota_text or "tier3" in quota_text or "-tier3" in quota_text:
+            return "Tier 3"
+        if "tier_2" in quota_text or "tier2" in quota_text or "-tier2" in quota_text:
+            return "Tier 2"
+        if "tier_1" in quota_text or "tier1" in quota_text or "paid_tier" in quota_text:
+            return "Tier 1"
+        if "free_tier" in quota_text or "freetier" in quota_text:
+            return "Free Tier"
+    return ""
+
+
+def format_quota_details(violations):
+    if not violations:
+        return "Unknown Tier"
+    violation = violations[0]
+    return f"(QM {violation.get('quotaMetric', '')} | QV {violation.get('quotaValue', '')})"
+
 
 async def test_key_tier(key: APIKey, session):
     data = {
@@ -40,44 +124,50 @@ async def test_key_tier(key: APIKey, session):
         }],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": "Kore",
+                    },
+                },
+            },
         },
-        "model": "gemini-2.5-pro-preview-tts"
+        "model": TTS_TIER_MODEL,
     }
 
-    async with session.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-preview-tts:generateContent?key={key.api_key}", json=data) as response:
-        resp_json = await response.json()
+    async with session.post(f"{GEMINI_API_BASE}/models/{TTS_TIER_MODEL}:generateContent", headers=gemini_headers(key), json=data) as response:
+        resp_json = await response_json(response)
         if response.status == 200:
             key.tier = "??? Tier"
         elif response.status == 400:
             if "exceeds the maximum number of tokens allowed" in resp_json.get("error", {}).get("message", ""):
                 key.tier = "Tier 3"
+            else:
+                key.tier = "Unknown Tier"
         elif response.status == 429:
-            violations = resp_json.get("error", {}).get("details", [])[1].get("violations", [])
-            for violation in violations:
-                quota_metric = violation.get("quotaMetric", "")
-                quota_value = violation.get("quotaValue", "")
-                if "paid_tier" in quota_metric and quota_value == "10000":
-                    key.tier = "Tier 1"
-                elif "tier_2" in quota_metric:
-                    key.tier = "Tier 2"
-                else:
-                    key.tier = f"(QM {quota_metric} | QV {quota_value})"
+            violations = quota_violations(resp_json)
+            key.tier = infer_tier_from_violations(violations) or format_quota_details(violations)
+        else:
+            key.tier = "Unknown Tier"
 
 
 async def test_makersuite_billing(key: APIKey, session):
     data = {"instances": [{"prompt": ""}]}
-    async with session.post(f"https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key={key.api_key}", json=data) as response:
-        resp_json = await response.json()
+    async with session.post(f"{GEMINI_API_BASE}/models/{IMAGEN_BILLING_MODEL}:predict", headers=gemini_headers(key), json=data) as response:
+        resp_json = await response_json(response)
+        if response.status in (200, 429):
+            return True
         if response.status == 400:
-            error_details = resp_json.get('error', {}).get('message', '')
-            if 'Imagen API is only accessible to billed users at this time' not in error_details:
+            error_details = resp_json.get("error", {}).get("message", "")
+            if "Imagen API is only accessible to billed users at this time" not in error_details:
                 return True
         return False
+
 
 def pretty_print_makersuite_keys(keys):
     total = 0
     billing_count = 0
-    ultra_count = 0
+    model_counts = {model: 0 for model in tracked_models}
 
     print('-' * 90)
     print(f'Validated {len(keys)} MakerSuite keys:')
@@ -90,6 +180,7 @@ def pretty_print_makersuite_keys(keys):
         "Tier 2",
         "Tier 3",
         "??? Tier",
+        "Unknown Tier",
     ]
 
     for key in keys:
@@ -106,18 +197,21 @@ def pretty_print_makersuite_keys(keys):
             keys_in_tier = keys_by_tier[tier]
             print(f'\n{len(keys_in_tier)} keys found in {tier}:')
             for key in keys_in_tier:
-                has_ultra = any(gemmy_ultra in model for model in key.models)
-                print(f'{key.api_key}' + (' | has ultra' if has_ultra else ''))
-                if has_ultra:
-                    ultra_count += 1
+                model_labels = [label for model, label in tracked_models.items() if model in key.models]
+                print(f'{key.api_key}' + (f" | {', '.join(model_labels)}" if model_labels else ''))
+                for model in key.models:
+                    if model in model_counts:
+                        model_counts[model] += 1
 
     if len(unknown_keys) > 0:
         print(f"Found {len(unknown_keys)} keys with strange quota values")
         for key in unknown_keys:
-            has_ultra = any(gemmy_ultra in model for model in key.models)
-            print(key.api_key + " | " + key.tier + (' | has ultra' if has_ultra else ''))
-            if has_ultra:
-                ultra_count += 1
+            model_labels = [label for model, label in tracked_models.items() if model in key.models]
+            print(key.api_key + " | " + key.tier + (f" | {', '.join(model_labels)}" if model_labels else ''))
+            for model in key.models:
+                if model in model_counts:
+                    model_counts[model] += 1
 
+    model_summary = ', '.join(f"{count} {tracked_models[model]}" for model, count in model_counts.items() if count > 0)
     print(f'\n--- Total Valid MakerSuite Keys: {total} ({billing_count} with billing enabled'
-          + (f', {ultra_count} with ultra access) ---\n' if ultra_count > 0 else ') ---\n'))
+          + (f', {model_summary}) ---\n' if model_summary else ') ---\n'))
