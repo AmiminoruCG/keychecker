@@ -89,6 +89,13 @@ class APIKey:
             self.blocked = True
             self.subbed = False
 
+        elif provider == Provider.PERPLEXITY:
+            self.model = ""
+            self.has_quota = True
+            self.rate_limited = False
+            self.usage_tokens = 0
+            self.cost = 0
+
     def clone(self):
         cloned_key = APIKey(self.provider, self.api_key)
         cloned_key.__dict__ = self.__dict__.copy()
@@ -108,3 +115,4 @@ class Provider(Enum):
     ELEVENLABS = 10
     DEEPSEEK = 11
     XAI = 12
+    PERPLEXITY = 13

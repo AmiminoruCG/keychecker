@@ -15,6 +15,7 @@ Currently supports and validates keys for the services below, and checks for the
 - ElevenLabs - (Key tier, remaining characters in plan, detect uncapped char quota, pro voice cloning limit, invoice details on pay as you go plans)
 - DeepSeek - (Account balance)
 - xAI - (Subscription status)
+- Perplexity - (Sonar access, quota/rate-limit status)
 
 # Usage:
 `pip install -r requirements.txt`
