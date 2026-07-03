@@ -16,6 +16,7 @@ Currently supports and validates keys for the services below, and checks for the
 - DeepSeek - (Account balance)
 - xAI - (Subscription status)
 - Perplexity - (Sonar access, quota/rate-limit status)
+- GLM - (Key validity, model access, balance/no-balance status)
 
 # Usage:
 `pip install -r requirements.txt`

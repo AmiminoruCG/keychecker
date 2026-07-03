@@ -96,6 +96,15 @@ class APIKey:
             self.usage_tokens = 0
             self.cost = 0
 
+        elif provider == Provider.GLM:
+            self.model = ""
+            self.models = []
+            self.has_balance = True
+            self.rate_limited = False
+            self.usage_tokens = 0
+            self.error_code = ""
+            self.error_message = ""
+
     def clone(self):
         cloned_key = APIKey(self.provider, self.api_key)
         cloned_key.__dict__ = self.__dict__.copy()
@@ -116,3 +125,4 @@ class Provider(Enum):
     DEEPSEEK = 11
     XAI = 12
     PERPLEXITY = 13
+    GLM = 14
