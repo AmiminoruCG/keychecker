@@ -11,12 +11,13 @@ Currently supports and validates keys for the services below, and checks for the
 - Azure - (Auto-fetch all deployments, auto-fetch best deployment/model, filter status, dall-e deployment)
 - Google Cloud Vertex AI - (Requires a key file since oauth tokens expire hourly.)
 - MistralAI - (Subscription status)
-- OpenRouter - (Estimated balance, usage in $, credit limit, RPM, has purchased any credits)
+- OpenRouter - (Account balance, key limit remaining, usage in $, RPM, has purchased any credits)
 - ElevenLabs - (Key tier, remaining characters in plan, detect uncapped char quota, pro voice cloning limit, invoice details on pay as you go plans)
 - DeepSeek - (Account balance)
 - xAI - (Subscription status)
 - Perplexity - (Sonar access, quota/rate-limit status)
 - GLM - (Key validity, model access, balance/no-balance status)
+- Moonshot - (Balance status, model access, kimi-k2.6 access)
 
 # Usage:
 `pip install -r requirements.txt`

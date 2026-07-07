@@ -13,6 +13,7 @@ from ElevenLabs import check_elevenlabs, pretty_print_elevenlabs_keys
 from XAI import check_xai, pretty_print_xai_keys
 from Perplexity import check_perplexity, pretty_print_perplexity_keys
 from GLM import check_glm, pretty_print_glm_keys
+from Moonshot import check_moonshot, pretty_print_moonshot_keys
 
 from APIKey import APIKey, Provider
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,7 +50,7 @@ if args.file:
     if inputted_keys is None:
         sys.exit(1)
 else:
-    print('Enter API keys (OpenAI/Anthropic/AI21/MakerSuite/AWS/Azure/Mistral/Elevenlabs/Perplexity/GLM) one per line. Press Enter on a blank line to start validation')
+    print('Enter API keys (OpenAI/Anthropic/AI21/MakerSuite/AWS/Azure/Mistral/Elevenlabs/Perplexity/GLM/Moonshot) one per line. Press Enter on a blank line to start validation')
     print('Expected format for AWS keys is accesskey:secret, for Azure keys it\'s resourcegroup:apikey. For Vertex AI keys the absolute path to the secrets key file is expected in quotes. "/path/to/secrets.json"')
     while True:
         current_line = input()
@@ -178,6 +179,16 @@ async def validate_glm(key: APIKey, sem):
         api_keys.add(key)
 
 
+async def validate_moonshot(key: APIKey, sem):
+    async with sem, aiohttp.ClientSession() as session:
+        IO.conditional_print(f"Checking Moonshot key: {key.api_key}", args.verbose)
+        if await check_moonshot(key, session) is None:
+            IO.conditional_print(f"Invalid Moonshot key: {key.api_key}", args.verbose)
+            return
+        IO.conditional_print(f"Moonshot key '{key.api_key}' is valid", args.verbose)
+        api_keys.add(key)
+
+
 def validate_aws(key: APIKey):
     IO.conditional_print(f"Checking AWS key: {key.api_key}", args.verbose)
     if check_aws(key) is None:
@@ -272,6 +283,7 @@ deepseek_regex = re.compile(r'sk-[a-f0-9]{32}')
 xai_regex = re.compile(r'xai-[A-Za-z0-9]{80}')
 perplexity_regex = re.compile(r'pplx-[A-Za-z0-9]{48,64}')
 glm_regex = re.compile(r'[a-f0-9]{32}\.[A-Za-z0-9_-]{16,64}')
+moonshot_regex = re.compile(r'sk-[A-Za-z0-9]{48}')
 # vertex_regex = re.compile(r'^(.+):(ya29.[A-Za-z0-9\-_]{469})$') regex for the oauth tokens, useless since they expire hourly
 executor = ThreadPoolExecutor(max_workers=100)
 concurrent_connections = asyncio.Semaphore(1500)
@@ -315,6 +327,9 @@ async def validate_keys():
         elif "." in key and glm_regex.match(key):
             key_obj = APIKey(Provider.GLM, key)
             tasks.append(execute_with_retries(validate_glm, key_obj, concurrent_connections, 5))
+        elif moonshot_regex.match(key):
+            key_obj = APIKey(Provider.MOONSHOT, key)
+            tasks.append(execute_with_retries(validate_moonshot, key_obj, concurrent_connections, 5))
         elif "sk-or-v1-" in key:
             match = openrouter_regex.match(key)
             if not match:
@@ -373,7 +388,7 @@ async def validate_keys():
     futures.clear()
 
 
-def get_invalid_keys(valid_oai_keys, valid_anthropic_keys, valid_ai21_keys, valid_makersuite_keys, valid_aws_keys, valid_azure_keys, valid_vertexai_keys, valid_mistral_keys, valid_openrouter_keys, valid_elevenlabs_keys, valid_deepseek_keys, valid_xai_keys, valid_perplexity_keys, valid_glm_keys):
+def get_invalid_keys(valid_oai_keys, valid_anthropic_keys, valid_ai21_keys, valid_makersuite_keys, valid_aws_keys, valid_azure_keys, valid_vertexai_keys, valid_mistral_keys, valid_openrouter_keys, valid_elevenlabs_keys, valid_deepseek_keys, valid_xai_keys, valid_perplexity_keys, valid_glm_keys, valid_moonshot_keys):
     valid_oai_keys_set = set([key.api_key for key in valid_oai_keys])
     valid_anthropic_keys_set = set([key.api_key for key in valid_anthropic_keys])
     valid_ai21_keys_set = set([key.api_key for key in valid_ai21_keys])
@@ -388,8 +403,9 @@ def get_invalid_keys(valid_oai_keys, valid_anthropic_keys, valid_ai21_keys, vali
     valid_xai_set = set([key.api_key for key in valid_xai_keys])
     valid_perplexity_set = set([key.api_key for key in valid_perplexity_keys])
     valid_glm_set = set([key.api_key for key in valid_glm_keys])
+    valid_moonshot_set = set([key.api_key for key in valid_moonshot_keys])
 
-    invalid_keys = inputted_keys - valid_oai_keys_set - valid_anthropic_keys_set - valid_ai21_keys_set - valid_makersuite_keys_set - valid_aws_keys_set - valid_azure_keys_set - valid_vertexai_keys_set - valid_mistral_keys_set - valid_openrouter_keys_set - valid_elevenlabs_set - valid_deepseek_set - valid_xai_set - valid_perplexity_set - valid_glm_set
+    invalid_keys = inputted_keys - valid_oai_keys_set - valid_anthropic_keys_set - valid_ai21_keys_set - valid_makersuite_keys_set - valid_aws_keys_set - valid_azure_keys_set - valid_vertexai_keys_set - valid_mistral_keys_set - valid_openrouter_keys_set - valid_elevenlabs_set - valid_deepseek_set - valid_xai_set - valid_perplexity_set - valid_glm_set - valid_moonshot_set
     invalid_keys_len = len(invalid_keys) + len(cloned_keys) if cloned_keys else len(invalid_keys)
     if invalid_keys_len < 1:
         return
@@ -415,6 +431,7 @@ def output_keys():
     valid_xai_keys = []
     valid_perplexity_keys = []
     valid_glm_keys = []
+    valid_moonshot_keys = []
 
     for key in api_keys:
         if key.provider == Provider.OPENAI:
@@ -445,6 +462,8 @@ def output_keys():
             valid_perplexity_keys.append(key)
         elif key.provider == Provider.GLM:
             valid_glm_keys.append(key)
+        elif key.provider == Provider.MOONSHOT:
+            valid_moonshot_keys.append(key)
 
     if should_write:
         output_filename = "key_snapshots.txt"
@@ -456,7 +475,7 @@ def output_keys():
         print(f"Key snapshot from {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("#" * 90)
         print(f'\n--- Checked {len(inputted_keys)} keys | {invalid_keys} were invalid ---')
-        get_invalid_keys(valid_oai_keys, valid_anthropic_keys, valid_ai21_keys, valid_makersuite_keys, valid_aws_keys, valid_azure_keys, valid_vertexai_keys, valid_mistral_keys, valid_openrouter_keys, valid_elevenlabs_keys, valid_deepseek_keys, valid_xai_keys, valid_perplexity_keys, valid_glm_keys)
+        get_invalid_keys(valid_oai_keys, valid_anthropic_keys, valid_ai21_keys, valid_makersuite_keys, valid_aws_keys, valid_azure_keys, valid_vertexai_keys, valid_mistral_keys, valid_openrouter_keys, valid_elevenlabs_keys, valid_deepseek_keys, valid_xai_keys, valid_perplexity_keys, valid_glm_keys, valid_moonshot_keys)
         print()
         if valid_oai_keys:
             pretty_print_oai_keys(valid_oai_keys, cloned_keys)
@@ -486,6 +505,8 @@ def output_keys():
             pretty_print_perplexity_keys(valid_perplexity_keys)
         if valid_glm_keys:
             pretty_print_glm_keys(valid_glm_keys)
+        if valid_moonshot_keys:
+            pretty_print_moonshot_keys(valid_moonshot_keys)
     else:
         print("OPENAI_KEY=" + ','.join(key.api_key for key in valid_oai_keys if key.has_quota))
         print("ANTHROPIC_KEY=" + ','.join(key.api_key for key in valid_anthropic_keys if key.has_quota))
@@ -495,6 +516,7 @@ def output_keys():
         print("MISTRAL_AI_KEY=" + ','.join(key.api_key for key in valid_mistral_keys))
         print("PERPLEXITY_API_KEY=" + ','.join(key.api_key for key in valid_perplexity_keys if key.has_quota and not key.rate_limited))
         print("GLM_API_KEY=" + ','.join(key.api_key for key in valid_glm_keys if key.has_balance and not key.rate_limited))
+        print("MOONSHOT_API_KEY=" + ','.join(key.api_key for key in valid_moonshot_keys if key.has_balance and key.kimi_k26_usable))
     if should_write:
         sys.stdout.file.close()
         sys.stdout = sys.__stdout__

@@ -67,11 +67,20 @@ class APIKey:
 
         elif provider == Provider.OPENROUTER:
             self.usage = 0
+            self.usage_daily = 0
+            self.usage_weekly = 0
+            self.usage_monthly = 0
             self.credit_limit = 0
+            self.limit_remaining = None
+            self.limit_reset = None
+            self.account_balance = None
+            self.total_credits = None
+            self.total_usage = None
             self.rpm = 0
             self.balance = 0
             self.limit_reached = False
             self.bought_credits = False
+            self.credits_api_available = False
 
         elif provider == Provider.ELEVENLABS:
             self.characters_left = 0
@@ -100,9 +109,25 @@ class APIKey:
             self.model = ""
             self.models = []
             self.has_balance = True
+            self.has_air_access = False
+            self.air_model = ""
+            self.air_usage_tokens = 0
             self.rate_limited = False
             self.usage_tokens = 0
             self.error_code = ""
+            self.error_message = ""
+
+        elif provider == Provider.MOONSHOT:
+            self.models = []
+            self.has_balance = False
+            self.available_balance = 0
+            self.cash_balance = 0
+            self.voucher_balance = 0
+            self.has_kimi_k26 = False
+            self.kimi_k26_usable = False
+            self.rate_limited = False
+            self.usage_tokens = 0
+            self.error_type = ""
             self.error_message = ""
 
     def clone(self):
@@ -126,3 +151,4 @@ class Provider(Enum):
     XAI = 12
     PERPLEXITY = 13
     GLM = 14
+    MOONSHOT = 15
