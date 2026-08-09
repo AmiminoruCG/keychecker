@@ -4,7 +4,7 @@ a fast, bulk key checker for various AI services
 Currently supports and validates keys for the services below, and checks for the listed attributes a key might have:
 
 - OpenAI - (Best model, key in quota, RPM (catches increase requests), tier, list of organizations if applicable, trial key status)
-- Anthropic - (Pozzed status and key tier, along with remaining character quota)
+- Anthropic - (Live key status, model access, usable balance status, and current rate-limit headroom)
 - AI21 - (Trial check)
 - Google MakerSuite (List of available models + billing status and key tier)
 - AWS - (Admin status, auto-fetch the region, logging status, username, bedrock status + enabled models)
@@ -14,7 +14,7 @@ Currently supports and validates keys for the services below, and checks for the
 - OpenRouter - (Account balance, key limit remaining, usage in $, RPM, has purchased any credits)
 - ElevenLabs - (Key tier, remaining characters in plan, detect uncapped char quota, pro voice cloning limit, invoice details on pay as you go plans)
 - DeepSeek - (Account balance)
-- xAI - (Subscription status)
+- xAI - (Live key, ACL and model access, usable billing status, test cost, and rate-limit headroom)
 - Perplexity - (Sonar access, quota/rate-limit status)
 - GLM - (Key validity, model access, balance/no-balance status)
 - Moonshot - (Balance status, model access, kimi-k2.6 access)

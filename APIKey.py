@@ -26,9 +26,34 @@ class APIKey:
         elif provider == Provider.ANTHROPIC:
             self.pozzed = False
             self.rate_limited = False
-            self.has_quota = True
+            self.has_quota = None
             self.tier = ""
             self.remaining_tokens = 0
+            self.validation_status = "unknown"
+            self.quota_status = "unknown"
+            self.permission_restricted = False
+            self.model = ""
+            self.models = []
+            self.rpm = 0
+            self.requests_limit = 0
+            self.requests_remaining = None
+            self.requests_reset = ""
+            self.tokens_limit = 0
+            self.tokens_remaining = None
+            self.tokens_reset = ""
+            self.input_tokens_limit = 0
+            self.input_tokens_remaining = None
+            self.input_tokens_reset = ""
+            self.output_tokens_limit = 0
+            self.output_tokens_remaining = None
+            self.output_tokens_reset = ""
+            self.retry_after = ""
+            self.usage_tokens = 0
+            self.input_tokens_used = 0
+            self.output_tokens_used = 0
+            self.error_type = ""
+            self.error_message = ""
+            self.request_id = ""
 
         elif provider == Provider.AI21:
             self.trial_elapsed = False
@@ -95,8 +120,38 @@ class APIKey:
             self.rate_limited = False
 
         elif provider == Provider.XAI:
-            self.blocked = True
+            self.blocked = False
             self.subbed = False
+            self.validation_status = "unknown"
+            self.access_status = "unknown"
+            self.has_usable_billing = None
+            self.rate_limited = False
+            self.permission_restricted = False
+            self.team_blocked = False
+            self.api_key_blocked = False
+            self.api_key_disabled = False
+            self.acls = []
+            self.full_endpoint_access = False
+            self.full_model_access = False
+            self.model = ""
+            self.models = []
+            self.text_models = []
+            self.requests_limit = 0
+            self.requests_remaining = None
+            self.requests_reset = ""
+            self.tokens_limit = 0
+            self.tokens_remaining = None
+            self.tokens_reset = ""
+            self.retry_after = ""
+            self.usage_tokens = 0
+            self.input_tokens_used = 0
+            self.output_tokens_used = 0
+            self.cost_usd_ticks = 0
+            self.test_cost_usd = None
+            self.service_tier = ""
+            self.error_type = ""
+            self.error_message = ""
+            self.request_id = ""
 
         elif provider == Provider.PERPLEXITY:
             self.model = ""
@@ -112,6 +167,11 @@ class APIKey:
             self.has_air_access = False
             self.air_model = ""
             self.air_usage_tokens = 0
+            self.coding_model = ""
+            self.has_coding_access = False
+            self.coding_plan_expired = False
+            self.coding_error_code = ""
+            self.coding_error_message = ""
             self.rate_limited = False
             self.usage_tokens = 0
             self.error_code = ""

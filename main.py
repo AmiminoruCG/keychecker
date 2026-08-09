@@ -50,7 +50,7 @@ if args.file:
     if inputted_keys is None:
         sys.exit(1)
 else:
-    print('Enter API keys (OpenAI/Anthropic/AI21/MakerSuite/AWS/Azure/Mistral/Elevenlabs/Perplexity/GLM/Moonshot) one per line. Press Enter on a blank line to start validation')
+    print('Enter API keys (OpenAI/Anthropic/AI21/MakerSuite/AWS/Azure/Vertex AI/Mistral/OpenRouter/ElevenLabs/DeepSeek/xAI/Perplexity/GLM/Moonshot) one per line. Press Enter on a blank line to start validation')
     print('Expected format for AWS keys is accesskey:secret, for Azure keys it\'s resourcegroup:apikey. For Vertex AI keys the absolute path to the secrets key file is expected in quotes. "/path/to/secrets.json"')
     while True:
         current_line = input()
@@ -85,24 +85,20 @@ async def validate_openai(key: APIKey, sem):
 
 
 async def validate_anthropic(key: APIKey, sem):
-    retry_count = 20
-    async with sem, aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with sem, aiohttp.ClientSession(timeout=timeout) as session:
         IO.conditional_print(f"Checking Anthropic key: {key.api_key}", args.verbose)
         key_status = await check_anthropic(key, session)
         if key_status is None:
             IO.conditional_print(f"Invalid Anthropic key: {key.api_key}", args.verbose)
             return
-        elif key_status is False:
-            i = 0
-            while await check_anthropic(key, session) is False and i < retry_count:
-                i += 1
-                await asyncio.sleep(1)
-                print(f"Stuck determining pozzed status of rate limited Anthropic key '{key.api_key[-8:]}' - attempt {i} of {retry_count}")
-                key.rate_limited = True
-            else:
-                if i < retry_count:
-                    key.rate_limited = False
-        IO.conditional_print(f"Anthropic key '{key.api_key}' is valid", args.verbose)
+        if key_status is False:
+            IO.conditional_print(
+                f"Could not verify Anthropic key '{key.api_key[-8:]}' due to an API error",
+                args.verbose,
+            )
+        else:
+            IO.conditional_print(f"Anthropic key '{key.api_key}' is valid", args.verbose)
         api_keys.add(key)
 
 
@@ -150,12 +146,20 @@ async def validate_elevenlabs(key: APIKey, sem):
 
 
 async def validate_xai(key: APIKey, sem):
-    async with sem, aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with sem, aiohttp.ClientSession(timeout=timeout) as session:
         IO.conditional_print(f"Checking xAI key: {key.api_key}", args.verbose)
-        if await check_xai(key, session) is None:
+        key_status = await check_xai(key, session)
+        if key_status is None:
             IO.conditional_print(f"Invalid xAI key: {key.api_key}", args.verbose)
             return
-        IO.conditional_print(f"xAI key '{key.api_key}' is valid", args.verbose)
+        if key_status is False:
+            IO.conditional_print(
+                f"Could not verify xAI key '{key.api_key[-8:]}' due to an API error",
+                args.verbose,
+            )
+        else:
+            IO.conditional_print(f"xAI key '{key.api_key}' is valid", args.verbose)
         api_keys.add(key)
 
 
@@ -269,8 +273,7 @@ async def execute_with_retries(func, key, sem, retries):
 
 
 oai_regex = re.compile(r'(sk-[a-zA-Z0-9_-]+T3BlbkFJ[a-zA-Z0-9_-]+)')
-anthropic_regex = re.compile(r'sk-ant-api03-[A-Za-z0-9\-_]{93}AA')
-anthropic_secondary_regex = re.compile(r'sk-ant-[A-Za-z0-9\-_]{86}')
+anthropic_regex = re.compile(r'sk-ant-[A-Za-z0-9_-]{40,}')
 anthropic_third_regex = re.compile(r'sk-[A-Za-z0-9]{86}')
 ai21_and_mistral_regex = re.compile('[A-Za-z0-9]{32}')
 elevenlabs_regex = re.compile(r'([a-z0-9]{32})')
@@ -280,7 +283,7 @@ aws_regex = re.compile(r'^(AKIA[0-9A-Z]{16}):([A-Za-z0-9+/]{40})$')
 azure_regex = re.compile(r'^(.+):([a-z0-9]{32})$')
 openrouter_regex = re.compile(r'sk-or-v1-[a-z0-9]{64}')
 deepseek_regex = re.compile(r'sk-[a-f0-9]{32}')
-xai_regex = re.compile(r'xai-[A-Za-z0-9]{80}')
+xai_regex = re.compile(r'xai-[A-Za-z0-9_-]{40,}')
 perplexity_regex = re.compile(r'pplx-[A-Za-z0-9]{48,64}')
 glm_regex = re.compile(r'[a-f0-9]{32}\.[A-Za-z0-9_-]{16,64}')
 moonshot_regex = re.compile(r'sk-[A-Za-z0-9]{48}')
@@ -300,8 +303,8 @@ async def validate_keys():
                 continue
             key_obj = APIKey(Provider.VERTEXAI, key)
             tasks.append(execute_with_retries(validate_vertexai, key_obj, concurrent_connections, 5))
-        elif "sk-ant-" in key[:7]:
-            match = anthropic_regex.match(key) if "ant-api03" in key else anthropic_secondary_regex.match(key)
+        elif key.startswith("sk-ant-"):
+            match = anthropic_regex.fullmatch(key)
             if not match:
                 continue
             key_obj = APIKey(Provider.ANTHROPIC, key)
@@ -312,8 +315,8 @@ async def validate_keys():
                 continue
             key_obj = APIKey(Provider.MAKERSUITE, key)
             tasks.append(execute_with_retries(validate_makersuite, key_obj, makersuite_semaphore, 5))
-        elif "xai-" in key[:4]:
-            match = xai_regex.match(key)
+        elif key.startswith("xai-"):
+            match = xai_regex.fullmatch(key)
             if not match:
                 continue
             key_obj = APIKey(Provider.XAI, key)
@@ -509,11 +512,23 @@ def output_keys():
             pretty_print_moonshot_keys(valid_moonshot_keys)
     else:
         print("OPENAI_KEY=" + ','.join(key.api_key for key in valid_oai_keys if key.has_quota))
-        print("ANTHROPIC_KEY=" + ','.join(key.api_key for key in valid_anthropic_keys if key.has_quota))
+        print("ANTHROPIC_KEY=" + ','.join(
+            key.api_key for key in valid_anthropic_keys
+            if key.validation_status == 'valid'
+            and key.has_quota is True
+            and not key.rate_limited
+        ))
         print("AWS_CREDENTIALS=" + ','.join(f"{key.api_key}:{region}" for key in valid_aws_keys if not key.useless and key.bedrock_enabled for region in [key.region] + key.alt_regions))
         print("GOOGLE_AI_KEY=" + ','.join(key.api_key for key in valid_makersuite_keys))
         print("AZURE_CREDENTIALS=" + ','.join(f"{key.api_key.split(':')[0]}:{key.best_deployment}:{key.api_key.split(':')[1]}" for key in valid_azure_keys if key.unfiltered))
         print("MISTRAL_AI_KEY=" + ','.join(key.api_key for key in valid_mistral_keys))
+        print("XAI_API_KEY=" + ','.join(
+            key.api_key for key in valid_xai_keys
+            if key.validation_status == 'valid'
+            and key.has_usable_billing is True
+            and not key.blocked
+            and not key.rate_limited
+        ))
         print("PERPLEXITY_API_KEY=" + ','.join(key.api_key for key in valid_perplexity_keys if key.has_quota and not key.rate_limited))
         print("GLM_API_KEY=" + ','.join(key.api_key for key in valid_glm_keys if key.has_balance and not key.rate_limited))
         print("MOONSHOT_API_KEY=" + ','.join(key.api_key for key in valid_moonshot_keys if key.has_balance and key.kimi_k26_usable))
