@@ -3,12 +3,12 @@ a fast, bulk key checker for various AI services
 
 Currently supports and validates keys for the services below, and checks for the listed attributes a key might have:
 
-- OpenAI - (Best model, key in quota, RPM (catches increase requests), tier, list of organizations if applicable, trial key status)
+- OpenAI - (Live inference, usable/exhausted/unknown quota, model-specific RPM/TPM, estimated tier, and optional organization metadata)
 - Anthropic - (Live key status, model access, usable balance status, and current rate-limit headroom)
 - AI21 - (Trial check)
 - Google MakerSuite (List of available models + billing status and key tier)
 - AWS - (Admin status, auto-fetch the region, logging status, username, bedrock status + enabled models)
-- Azure - (Auto-fetch all deployments, auto-fetch best deployment/model, filter status, dall-e deployment)
+- Azure - (Live inference, deployment discovery and access, quota status, and model-specific rate limits)
 - Google Cloud Vertex AI - (Requires a key file since oauth tokens expire hourly.)
 - MistralAI - (Subscription status)
 - OpenRouter - (Account balance, separate key spending limit, budget from these limits, and spending in USD)
@@ -32,7 +32,7 @@ Outputs keys in a format that can be easily copied and pasted into khanon's prox
 
 `-nooutput`
 
-Stops outputting and saving keys to the snapshot file (proxyoutput will also do this)
+Disables writing the snapshot file; console output still includes keys (`-proxyoutput` also disables snapshot-file writing).
 
 `-file`
 
@@ -48,7 +48,7 @@ Uses the slower legacy AWS checker (thread parallelized + boto3) instead of the 
 
 `-verifyorg`
 
-Enables the OpenAI checker to check if orgs are verified (by default this is disabled since it incurs one token of o3 usage)
+Adds an optional small `o3` access probe. It reports an explicit organization-verification requirement if returned by the API. Successful model access does not prove identity verification. This additional request is billable and disabled by default.
 
 # OpenRouter balance output
 
@@ -75,3 +75,35 @@ The account `/credits` endpoint requires a management key according to the API r
 Temporary failures checking `/key` remain visible as `inconclusive`; failure of the optional `/credits` lookup does not invalidate authenticated keys. The deprecated `rate_limit` object is no longer displayed as current RPM. Normal snapshots use the same readable output.
 
 API references: [key credit limits and usage](https://openrouter.ai/docs/api_reference/limits), [account credits and permissions](https://openrouter.ai/docs/api/api-reference/credits/get-credits).
+
+# OpenAI checks
+
+The default check lists models, then sends a small real inference request. It prefers inexpensive text models and stops at the first successful response or billing/quota error. Chat probes allow one output token; a Responses-only model allows up to 16 output tokens. Input tokens are also billable. Up to three model candidates are tried when a model is missing or disallowed.
+
+`credit_balance_exhausted`, spend limits and other billing errors are distinct from temporary rate limits, permission restrictions and API/network failures. Inconclusive keys remain visible for retry; they are not reported as invalid or exported by `-proxyoutput`. Scoped `sk-proj-` and `sk-svcacct-` keys are recognized without requiring an internal marker.
+
+RPM and TPM are the limits returned for the tested model and project. `Tier N (estimate)` means both limits match that model's published defaults; it does not verify the account's usage tier. Custom limits, missing headers or models without a reference table show `Tier not exposed by API` without affecting the key's usable-quota result. No manual limit increase is inferred.
+
+Organization metadata from the legacy `/me` endpoint is best effort. Its failure does not invalidate a key. Alternate organization checks use IDs and fresh state, and apply only to legacy user keys. Project and service-account keys are not tested against other organizations.
+
+Transient responses have bounded retries (up to three attempts, respecting `Retry-After`). A delay above ten seconds defers the check; it is never shortened. POST connection failures are left inconclusive because the request may already have been billed. Redirects are disabled.
+
+The normal console/snapshot output contains the keys as before. `-nooutput` disables snapshot-file writing; it does not hide console output.
+
+Run regression tests with `python -m unittest discover -s tests -v`.
+
+# Azure checks
+
+Azure input accepts `resource-name:apikey` or a full HTTPS resource endpoint followed by `:apikey`, for example `https://example.openai.azure.com:apikey`. The resource name is the name of the Azure OpenAI resource, not its resource group. A deployment URL such as `https://example.openai.azure.com/openai/deployments/my-chat:apikey` can supply a deployment name when listing deployments is unavailable.
+
+The checker uses Azure's v1 API for small real text-generation probes, allowing up to 16 output tokens per probe. Input and generated tokens are billable. It prioritizes inexpensive supported text deployments; the selected deployment must have completed a successful inference request. Image, embedding, retired, and unsupported deployments remain visible when discovered but are not probed as chat models. Failed probes remain visible with their API status.
+
+Deployment discovery is best effort. The checker can consult the legacy listing endpoint for deployment metadata, but an unavailable listing does not by itself invalidate authentication. If discovery fails and no deployment name is available, inference access remains unconfirmed. A valid key with no usable text deployment, permission restrictions, a temporary rate limit, or a network/server error stays visible as restricted or inconclusive rather than being silently discarded as invalid.
+
+Requests use bounded timeouts and retries, and Azure credential checks run with limited concurrency. Error messages and verbose progress use a credential fingerprint instead of the secret. Normal result/snapshot output still includes credentials; use `-nooutput` to disable snapshot-file writing.
+
+Each credential check considers at most 20 text deployments and 10 discovery pages, with a 90-second budget for starting requests. An in-flight request is still subject to its own connect/read timeout. Untested deployments remain visible as `not_checked`. Up to three attempts respect Azure's `Retry-After` or millisecond retry headers; waits above ten seconds are deferred. POST network failures are not replayed because inference may already have been billed. The `/openai/v1/models` catalogue is used only as an authentication fallback, never as a source of deployment names.
+
+The presence or absence of content-filter annotations does not prove that filtering is enabled or disabled. The checker makes no `UNFILTERED` claim. `-proxyoutput` exports only a confirmed usable deployment that fits the legacy proxy credential format.
+
+API references: [Azure v1 lifecycle](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle), [chat-completion request and response fields](https://learn.microsoft.com/en-us/azure/foundry/openai/latest), and [reasoning model parameters](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning).

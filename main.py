@@ -1,11 +1,11 @@
 from Anthropic import check_anthropic, pretty_print_anthropic_keys
 from Deepseek import check_whale, pretty_print_deepseek_keys
 from IO import IO
-from OpenAI import get_oai_model, get_oai_key_attribs, get_oai_org, pretty_print_oai_keys, clone_key
+from OpenAI import check_openai, is_openai_key, openai_key_usable, openai_status_text, pretty_print_oai_keys, clone_key
 from AI21 import check_ai21, pretty_print_ai21_keys
 from MakerSuite import check_makersuite, pretty_print_makersuite_keys
 from AWS import check_aws, pretty_print_aws_keys
-from Azure import check_azure, pretty_print_azure_keys
+from Azure import check_azure, is_azure_key, azure_key_usable, azure_proxy_credential, azure_status_text, pretty_print_azure_keys
 from VertexAI import check_vertexai, pretty_print_vertexai_keys
 from Mistral import check_mistral, pretty_print_mistral_keys
 from OpenRouter import check_openrouter, openrouter_status_text, pretty_print_openrouter_keys
@@ -21,6 +21,7 @@ import sys
 from datetime import datetime
 import re
 import argparse
+import hashlib
 import os.path
 import asyncio
 import aiohttp
@@ -38,7 +39,7 @@ def parse_args():
     parser.add_argument('-file', '--file', action='store', dest='file', help='read slop from a provided filename')
     parser.add_argument('-verbose', '--verbose', action='store_true', help='watch as your slop is checked real time')
     parser.add_argument('-awslegacy', '--awslegacy', action='store_true', help='use old slow aws checker instead of fast new one for some reason.')
-    parser.add_argument('-verifyorg', '--verifyorg', action='store_true', help='sends a test prompt with o3 to detect if an openai organization has completed id verification.')
+    parser.add_argument('-verifyorg', '--verifyorg', action='store_true', help='adds a small o3 access probe; reports explicit verification requirements, not proof of identity verification.')
     return parser.parse_args()
 
 
@@ -51,7 +52,7 @@ if args.file:
         sys.exit(1)
 else:
     print('Enter API keys (OpenAI/Anthropic/AI21/MakerSuite/AWS/Azure/Vertex AI/Mistral/OpenRouter/ElevenLabs/DeepSeek/xAI/Perplexity/GLM/Moonshot) one per line. Press Enter on a blank line to start validation')
-    print('Expected format for AWS keys is accesskey:secret, for Azure keys it\'s resourcegroup:apikey. For Vertex AI keys the absolute path to the secrets key file is expected in quotes. "/path/to/secrets.json"')
+    print('Expected format for AWS keys is accesskey:secret, for Azure keys it\'s resource-name:apikey or https://resource.openai.azure.com:apikey. For Vertex AI keys the absolute path to the secrets key file is expected in quotes. "/path/to/secrets.json"')
     while True:
         current_line = input()
         if not current_line:
@@ -63,25 +64,21 @@ else:
 # hold on let me land
 cloned_keys = set()
 async def validate_openai(key: APIKey, sem):
-    retries = 10
-    async with sem, aiohttp.ClientSession() as session:
-        IO.conditional_print(f"Checking OpenAI key: {key.api_key}", args.verbose)
-        if await get_oai_model(key, session, retries) is None:
-            IO.conditional_print(f"Invalid OpenAI key: {key.api_key}", args.verbose)
+    timeout = aiohttp.ClientTimeout(total=20, connect=10)
+    async with sem, aiohttp.ClientSession(timeout=timeout) as session:
+        label = f"...{key.api_key[-8:]}"
+        IO.conditional_print(f"Checking OpenAI key: {label}", args.verbose)
+        result = await check_openai(key, session, check_id=args.verifyorg)
+        if result is None:
+            IO.conditional_print(f"Invalid OpenAI key: {label}", args.verbose)
             return
-        if await get_oai_key_attribs(key, session, retries, check_id=args.verifyorg) is None:
-            return
-        if await get_oai_org(key, session, retries) is None:
-            return
-        IO.conditional_print(f"OpenAI key '{key.api_key}' is valid", args.verbose)
+        IO.conditional_print(f"OpenAI key {label}: {openai_status_text(key)}", args.verbose)
+        # Preserve inconclusive checks in their own output group, not Invalid Keys.
         api_keys.add(key)
-        global cloned_keys
-        cloner = await clone_key(key, session, retries)
-        if cloner:
-            cloned_keys.update(cloner)
-        if cloned_keys:
-            IO.conditional_print(f"Cloned OpenAI key '{key.api_key}'", args.verbose)
-            api_keys.update(cloned_keys)
+        if key.validation_status == "valid":
+            alternatives = await clone_key(key, session, check_id=args.verifyorg)
+            cloned_keys.update(alternatives)
+            api_keys.update(alternatives)
 
 
 async def validate_anthropic(key: APIKey, sem):
@@ -212,13 +209,28 @@ async def validate_aws_async(key: APIKey, sem):
         api_keys.add(key)
 
 
-def validate_azure(key: APIKey):
-    IO.conditional_print(f"Checking Azure key: {key.api_key}", args.verbose)
-    if check_azure(key) is None:
-        IO.conditional_print(f"Invalid Azure key: {key.api_key}", args.verbose)
-        return
-    IO.conditional_print(f"Azure key '{key.api_key}' is valid", args.verbose)
-    api_keys.add(key)
+async def validate_azure(key: APIKey, sem):
+    # Use a fingerprint because network errors can otherwise expose credentials.
+    label = hashlib.sha256(key.api_key.encode("utf-8")).hexdigest()[:10]
+    async with sem:
+        IO.conditional_print(f"Checking Azure credential #{label}", args.verbose)
+        try:
+            result = await asyncio.to_thread(check_azure, key)
+        except Exception as error:
+            key.validation_status = "unknown"
+            key.access_status = "unknown"
+            key.has_quota = None
+            key.error_code = type(error).__name__
+            key.error_message = "Unexpected error during Azure validation; check remains inconclusive."
+            print(f"Azure credential #{label}: {key.error_message} ({type(error).__name__})")
+            api_keys.add(key)
+            return
+        if result is None:
+            IO.conditional_print(f"Invalid Azure credential #{label}: {azure_status_text(key)}", args.verbose)
+            return
+        IO.conditional_print(f"Azure credential #{label}: {azure_status_text(key)}", args.verbose)
+        # Keep restricted and inconclusive checks visible for a later retry.
+        api_keys.add(key)
 
 
 async def validate_vertexai(key: APIKey, sem):
@@ -272,7 +284,6 @@ async def execute_with_retries(func, key, sem, retries):
             break
 
 
-oai_regex = re.compile(r'(sk-[a-zA-Z0-9_-]+T3BlbkFJ[a-zA-Z0-9_-]+)')
 anthropic_regex = re.compile(r'sk-ant-[A-Za-z0-9_-]{40,}')
 anthropic_third_regex = re.compile(r'sk-[A-Za-z0-9]{86}')
 ai21_and_mistral_regex = re.compile('[A-Za-z0-9]{32}')
@@ -280,7 +291,6 @@ elevenlabs_regex = re.compile(r'([a-z0-9]{32})')
 elevenlabs_secondary_regex = re.compile(r'sk_[a-z0-9]{48}')
 makersuite_regex = re.compile(r'AIzaSy[A-Za-z0-9\-_]{33}')
 aws_regex = re.compile(r'^(AKIA[0-9A-Z]{16}):([A-Za-z0-9+/]{40})$')
-azure_regex = re.compile(r'^(.+):([a-z0-9]{32})$')
 openrouter_regex = re.compile(r'sk-or-v1-[a-z0-9]{64}')
 deepseek_regex = re.compile(r'sk-[a-f0-9]{32}')
 xai_regex = re.compile(r'xai-[A-Za-z0-9_-]{40,}')
@@ -292,6 +302,8 @@ executor = ThreadPoolExecutor(max_workers=100)
 concurrent_connections = asyncio.Semaphore(1500)
 makersuite_semaphore = asyncio.Semaphore(50)  # when did google become such a pussy
 deepseek_semaphore = asyncio.Semaphore(50)
+openai_semaphore = asyncio.Semaphore(25)
+azure_semaphore = asyncio.Semaphore(10)
 
 async def validate_keys():
     tasks = []
@@ -303,12 +315,19 @@ async def validate_keys():
                 continue
             key_obj = APIKey(Provider.VERTEXAI, key)
             tasks.append(execute_with_retries(validate_vertexai, key_obj, concurrent_connections, 5))
+        elif is_azure_key(key):
+            key_obj = APIKey(Provider.AZURE, key)
+            tasks.append(validate_azure(key_obj, azure_semaphore))
         elif key.startswith("sk-ant-"):
             match = anthropic_regex.fullmatch(key)
             if not match:
                 continue
             key_obj = APIKey(Provider.ANTHROPIC, key)
             tasks.append(execute_with_retries(validate_anthropic, key_obj, concurrent_connections, 5))
+        elif is_openai_key(key):
+            key_obj = APIKey(Provider.OPENAI, key)
+            # OpenAI handles bounded retries itself; do not multiply them here.
+            tasks.append(validate_openai(key_obj, openai_semaphore))
         elif "AIzaSy" in key[:6]:
             match = makersuite_regex.match(key)
             if not match:
@@ -330,7 +349,7 @@ async def validate_keys():
         elif "." in key and glm_regex.match(key):
             key_obj = APIKey(Provider.GLM, key)
             tasks.append(execute_with_retries(validate_glm, key_obj, concurrent_connections, 5))
-        elif moonshot_regex.match(key):
+        elif moonshot_regex.fullmatch(key):
             key_obj = APIKey(Provider.MOONSHOT, key)
             tasks.append(execute_with_retries(validate_moonshot, key_obj, concurrent_connections, 5))
         elif "sk-or-v1-" in key:
@@ -347,7 +366,7 @@ async def validate_keys():
             elif anthropic_flag:
                 match = anthropic_third_regex.match(key)
             else:
-                match = oai_regex.match(key)
+                continue  # OpenAI keys were already routed above.
             if not match:
                 continue
             key_obj = APIKey(Provider.DEEPSEEK if deepseek_flag else Provider.ANTHROPIC if anthropic_flag else Provider.OPENAI, key)
@@ -361,12 +380,6 @@ async def validate_keys():
                 futures.append(executor.submit(validate_aws, key_obj))
             else:
                 tasks.append(execute_with_retries(validate_aws_async, key_obj, concurrent_connections, 5))
-        elif ":" in key and "AKIA" not in key:
-            match = azure_regex.match(key)
-            if not match:
-                continue
-            key_obj = APIKey(Provider.AZURE, key)
-            futures.append(executor.submit(validate_azure, key_obj))
         else:
             if "sk_" in key[:3]:
                 match = elevenlabs_secondary_regex.match(key)
@@ -386,8 +399,12 @@ async def validate_keys():
         if result is not None:
             api_keys.add(result)
 
-    for _ in as_completed(futures):
-        pass
+    for future in as_completed(futures):
+        try:
+            future.result()
+        except Exception as error:
+            # Do not print exception text: a provider error can contain secrets.
+            print(f"AWS worker failed with {type(error).__name__}; validation could not finish.")
     futures.clear()
 
 
@@ -511,7 +528,7 @@ def output_keys():
         if valid_moonshot_keys:
             pretty_print_moonshot_keys(valid_moonshot_keys)
     else:
-        print("OPENAI_KEY=" + ','.join(key.api_key for key in valid_oai_keys if key.has_quota))
+        print("OPENAI_KEY=" + ','.join(sorted({key.api_key for key in valid_oai_keys if openai_key_usable(key)})))
         print("ANTHROPIC_KEY=" + ','.join(
             key.api_key for key in valid_anthropic_keys
             if key.validation_status == 'valid'
@@ -520,7 +537,12 @@ def output_keys():
         ))
         print("AWS_CREDENTIALS=" + ','.join(f"{key.api_key}:{region}" for key in valid_aws_keys if not key.useless and key.bedrock_enabled for region in [key.region] + key.alt_regions))
         print("GOOGLE_AI_KEY=" + ','.join(key.api_key for key in valid_makersuite_keys))
-        print("AZURE_CREDENTIALS=" + ','.join(f"{key.api_key.split(':')[0]}:{key.best_deployment}:{key.api_key.split(':')[1]}" for key in valid_azure_keys if key.unfiltered))
+        print("AZURE_CREDENTIALS=" + ','.join(
+            credential for key in valid_azure_keys
+            if azure_key_usable(key)
+            for credential in [azure_proxy_credential(key)]
+            if credential
+        ))
         print("MISTRAL_AI_KEY=" + ','.join(key.api_key for key in valid_mistral_keys))
         print("XAI_API_KEY=" + ','.join(
             key.api_key for key in valid_xai_keys

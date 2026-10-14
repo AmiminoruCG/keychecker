@@ -8,20 +8,37 @@ class APIKey:
 
         if provider == Provider.OPENAI:
             self.model = ""
-            self.has_quota = False
+            self.models = []
+            self.has_quota = None
+            self.validation_status = "unknown"
+            self.quota_status = "unknown"
+            self.rate_limited = False
+            self.permission_restricted = False
+            self.blocked = False
             self.default_org = ""
             self.organizations = []
-            self.rpm = 0
+            self.organization_names = {}
+            self.org_metadata_status = "not_checked"
+            self.rpm = None
+            self.tpm = None
+            self.requests_remaining = None
+            self.tokens_remaining = None
+            self.requests_reset = ""
+            self.tokens_reset = ""
+            self.retry_after = ""
             self.tier = ""
+            self.tier_reason = ""
             self.has_special_models = False
-            self.real_32k = False
-            self.the_one = False
-            self.extra_models = False
-            self.extra_model_list = set()
-            self.id_verified = False
-            self.slop = True
-            self.missing_models = set()
-            self.access_to_model_listing = True
+            self.id_verified = None
+            self.org_verification_status = "not_checked"
+            self.access_to_model_listing = None
+            self.input_tokens_used = 0
+            self.output_tokens_used = 0
+            self.usage_tokens = 0
+            self.error_type = ""
+            self.error_code = ""
+            self.error_message = ""
+            self.request_id = ""
 
         elif provider == Provider.ANTHROPIC:
             self.pozzed = False
@@ -71,12 +88,28 @@ class APIKey:
 
         elif provider == Provider.AZURE:
             self.endpoint = ""
+            self.resource_name = ""
+            self.deployment_hint = ""
             self.best_deployment = ""
             self.model = ""
             self.deployments = []
-            self.unfiltered = False
-            self.dalle_deployments = ""
-            self.has_gpt4_turbo = []
+            self.validation_status = "unknown"
+            self.access_status = "unknown"
+            self.has_quota = None
+            self.discovery_status = "not_checked"
+            self.discovery_complete = False
+            self.error_code = ""
+            self.error_message = ""
+            self.request_id = ""
+            self.retry_after = ""
+            self.usage_tokens = 0
+            self.input_tokens_used = 0
+            self.output_tokens_used = 0
+            self.requests_made = 0
+            self.rpm = None
+            self.tpm = None
+            self.unfiltered = None
+            self.filter_status = "unknown"
 
         elif provider == Provider.VERTEXAI:
             self.project_id = ""

@@ -1,387 +1,538 @@
-import copy
-import APIKey
+"""OpenAI key validation using a bounded, real inference request.
+
+A model listing proves authentication, not usable billing. Rate-limit headers
+belong to the probed model/project; a matching published tier is only an estimate.
+"""
 import asyncio
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
+import random
+import re
+
+import aiohttp
+from APIKey import APIKey
+
 
 oai_api_url = "https://api.openai.com/v1"
-# free tier keys are no longer considered human
-oai_tiers = {
-    'Tier 1': {'tpm': 500000, 'rpm': 500},  # why is this grayed out on the website
-    'Tier 2': {'tpm': 1000000, 'rpm': 5000},
-    'Tier 3': {'tpm': 2000000, 'rpm': 5000},
-    'Tier 4': {'tpm': 4000000, 'rpm': 10000},
-    'Tier 5': {'tpm': 40000000, 'rpm': 15000} # non gpt-5 -> 30000000, 10000
+MAX_MODEL_PROBES = 3
+MAX_RETRY_DELAY = 10
+MAX_RETRY_WAIT = 20
+unknown = "Tier not exposed by API"
+
+# Published short-context limits checked 2026-09-26. Match BOTH RPM and TPM.
+# https://developers.openai.com/api/docs/models/<model>
+SMALL_MODEL_TIERS = (
+    (500, 200_000), (5_000, 2_000_000), (5_000, 4_000_000),
+    (10_000, 10_000_000), (30_000, 150_000_000),
+)
+MODEL_TIERS = {
+    "gpt-4o-mini": SMALL_MODEL_TIERS,
+    "gpt-4.1-nano": SMALL_MODEL_TIERS,
+    "gpt-4o": (
+        (500, 30_000), (5_000, 450_000), (5_000, 800_000),
+        (10_000, 2_000_000), (10_000, 30_000_000),
+    ),
+    "gpt-5": (
+        (500, 500_000), (5_000, 1_000_000), (5_000, 2_000_000),
+        (10_000, 4_000_000), (15_000, 40_000_000),
+    ),
+}
+MODEL_PREFERENCE = (
+    "gpt-4.1-nano", "gpt-4o-mini", "gpt-5-nano", "gpt-5-mini",
+    "gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-5",
+)
+RETIRED_MODELS = {
+    "chatgpt-4o-latest", "gpt-5-chat-latest", "gpt-5.1-chat-latest",
+    "gpt-5.2-chat-latest", "gpt-5.3-chat-latest", "gpt-5-codex",
+    "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-codex-max",
+    "gpt-5.2-codex", "codex-mini-latest", "o1-preview", "o1-mini",
+}
+BILLING_CODES = {
+    "insufficient_quota", "credit_balance_exhausted", "billing_not_active",
+    "billing_hard_limit_reached", "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded", "organization_usage_limit_exceeded",
+}
+BLOCK_CODES = {
+    "access_terminated", "account_deactivated", "organization_deactivated",
+    "unsupported_country_region_territory", "ip_not_authorized",
+    "ip_not_allowed", "ip_not_in_allowlist",
 }
 
-standard_model_ids = {
-    "omni-moderation-2024-09-26",
-    "gpt-4o-mini-audio-preview-2024-12-17",
-    "dall-e-3",
-    "dall-e-2",
-    "gpt-4o-audio-preview-2024-10-01",
-    "o1",
-    "gpt-4o-audio-preview",
-    "gpt-4o-mini-realtime-preview-2024-12-17",
-    "o1-2024-12-17",
-    "gpt-4-0314",
-    "gpt-4o-mini-realtime-preview",
-    "o1-mini-2024-09-12",
-    "o1-preview-2024-09-12",
-    "o1-mini",
-    "o1-preview",
-    "gpt-4o-mini-audio-preview",
-    "whisper-1",
-    "gpt-4-turbo",
-    "gpt-4o-realtime-preview-2024-10-01",
-    "gpt-4",
-    "babbage-002",
-    "gpt-4-turbo-preview",
-    "tts-1-hd-1106",
-    "gpt-4-0125-preview",
-    "gpt-4o-audio-preview-2024-12-17",
-    "tts-1-hd",
-    "gpt-4o-mini-2024-07-18",
-    "gpt-4o-2024-08-06",
-    "gpt-4o",
-    "tts-1",
-    "tts-1-1106",
-    "gpt-4-turbo-2024-04-09",
-    "davinci-002",
-    "gpt-3.5-turbo-1106",
-    "gpt-4o-mini",
-    "gpt-4o-2024-05-13",
-    "gpt-3.5-turbo-instruct",
-    "chatgpt-4o-latest",
-    "gpt-3.5-turbo-instruct-0914",
-    "gpt-3.5-turbo-0125",
-    "gpt-4o-realtime-preview-2024-12-17",
-    "gpt-3.5-turbo",
-    "gpt-3.5-turbo-16k-0613",
-    "gpt-4o-realtime-preview",
-    "gpt-3.5-turbo-16k",
-    "text-embedding-3-small",
-    "gpt-4o-2024-11-20",
-    "gpt-4-1106-preview",
-    "text-embedding-ada-002",
-    "text-embedding-3-large",
-    "o3-mini-2025-01-31",
-    "gpt-4-0613",
-    "o3-mini",
-    "omni-moderation-latest",
-    "gpt-4-base",
-    "o1-pro",
-    "o1-pro-2025-03-19",
-    "gpt-4o-transcribe",
-    "gpt-4o-transcribe-diarize",
-    "computer-use-preview",
-    "computer-use-preview-2025-03-11",
-    "gpt-4o-search-preview",
-    "gpt-4o-search-preview-2025-03-11",
-    "gpt-4o-mini-search-preview",
-    "gpt-4o-mini-search-preview-2025-03-11",
-    "gpt-4o-mini-transcribe",
-    "gpt-4o-mini-tts",
-    "o3",
-    "o4-mini",
-    "o3-2025-04-16",
-    "o4-mini-2025-04-16",
-    "gpt-4.1-mini",
-    "gpt-4.1-mini-2025-04-14",
-    "gpt-4.1-nano",
-    "gpt-4.1-nano-2025-04-14",
-    "gpt-4.1",
-    "gpt-4.1-2025-04-14",
-    "gpt-image-1",
-    "gpt-image-1-mini",
-    "codex-mini-latest",
-    "gpt-4o-realtime-preview-2025-06-03",
-    "gpt-4o-audio-preview-2025-06-03",
-    "o3-pro",
-    "o3-pro-2025-06-10",
-    "o3-deep-research",
-    "o3-deep-research-2025-06-26",
-    "o4-mini-deep-research",
-    "o4-mini-deep-research-2025-06-26",
-    "gpt-5-mini",
-    "gpt-5-mini-2025-08-07",
-    "gpt-5-nano",
-    "gpt-5-nano-2025-08-07",
-    "gpt-5",
-    "gpt-5-2025-08-07",
-    "gpt-5-chat-latest",
-    "gpt-5-codex",
-    "gpt-5-pro",
-    "gpt-5-pro-2025-10-06",
-    "gpt-5-search-api",
-    "gpt-5-search-api-2025-10-14",
-    "gpt-audio-2025-08-28",
-    "gpt-realtime-2025-08-28",
-    "gpt-audio",
-    "gpt-audio-mini",
-    "gpt-audio-mini-2025-10-06",
-    "gpt-realtime",
-    "gpt-realtime-mini",
-    "gpt-realtime-mini-2025-10-06",
-    "sora-2",
-    "sora-2-pro",
-    "gpt-5.1-2025-11-13",
-    "gpt-5.1-chat-latest",
-    "gpt-5.1",
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-mini",
-}
 
-running_org_verify = False
-
-non_slop_standard = {"gpt-5", "gpt-5-chat-latest", "o3", "gpt-4.1", "chatgpt-4o-latest", "gpt-4o"}  # i imagine this is all people care about now
-async def get_oai_model(key: APIKey, session, retries, org=None):
-    accessible_models = set()
-    for _ in range(retries):
-        headers = {'Authorization': f'Bearer {key.api_key}'}
-        if org is not None:
-            headers['OpenAI-Organization'] = org
-        async with session.get(f'{oai_api_url}/models', headers=headers) as response:
-            if response.status == 200:
-                data = await response.json()
-                for model in data["data"]:
-                    model_id = model["id"]
-                    if "ft:" in model_id:
-                        key.has_special_models = True
-                    elif model_id not in standard_model_ids and ":ft-" not in model_id:
-                        key.extra_models = True
-                        key.extra_model_list.add(model_id)
-
-                    if model_id == "gpt-4-base" or model_id == "gpt-5-alpha-max" or model_id == "gpt-4.5-preview":
-                        key.the_one = True
-                        key.slop = False
-                    if model_id == "gpt-4-32k" or model_id == "gpt-4-32k-0613":
-                        key.real_32k = True
-                        key.slop = False
-                    if model_id in non_slop_standard:
-                        key.slop = False
-                        key.model = model_id
-                        accessible_models.add(model_id)
-
-                key.missing_models = non_slop_standard.difference(accessible_models)
-
-                return True
-            elif response.status == 403:
-                key.model = "gpt-5"
-                key.access_to_model_listing = False
-                return True
-            elif response.status != 502:
-                return
-        await asyncio.sleep(0.5)
+def is_openai_key(value):
+    """Route scoped keys without relying on their internal marker or length."""
+    return bool(
+        re.fullmatch(r"sk-(?:proj|svcacct)-[A-Za-z0-9_-]{20,}", value)
+        or re.fullmatch(r"sk-[A-Za-z0-9_-]+T3BlbkFJ[A-Za-z0-9_-]+", value)
+    )
 
 
-async def get_oai_key_attribs(key: APIKey, session, retries, org=None, check_id=False):
-    param = "max_tokens" if "gpt-4" in key.model else "max_completion_tokens"
-    chat_object = {"model": key.model, "messages": [{"role": "user", "content": ""}], param: 0}
-    for _ in range(retries):
-        headers = {'Authorization': f'Bearer {key.api_key}', 'accept': 'application/json'}
-        if org is not None:
-            headers['OpenAI-Organization'] = org
-        async with session.post(f'{oai_api_url}/chat/completions', headers=headers, json=chat_object) as response:
-            if (response.status == 403):
-                return True
-            elif response.status in [400, 429]:
-                data = await response.json()
-                message = data["error"]["type"]
-                if message is None:
-                    return
-                match message:
-                    case "access_terminated":
-                        return
-                    case "billing_not_active":
-                        return
-                    case "insufficient_quota":
-                        key.has_quota = False
-                    case "invalid_request_error":
-                        key.has_quota = True
-                        key.rpm = int(response.headers.get("x-ratelimit-limit-requests"))
-                        tpm = int(response.headers.get("x-ratelimit-limit-tokens"))
-                        key.tier = await get_oai_key_tier(tpm, key.model)
-                        if check_id:
-                            global running_org_verify
-                            running_org_verify = True
-                            key.id_verified = await check_id_verified(key, session, retries)
-                        key.slop = False
-                return True
-            elif response.status not in [502, 500]:
-                return
-        await asyncio.sleep(0.5)
+def model_family(model):
+    if model.startswith("ft:"):
+        model = model.split(":", 2)[1]
+    return re.sub(r"-\d{4}-\d{2}-\d{2}$", "", model)
 
 
-async def check_id_verified(key: APIKey, session, retries, org=None):
-    # valid parameter check is ran before unverified org detection, so the request has to be legitimate.
-    chat_object = {"model": "o3", "messages": [{"role": "user", "content": ""}], "max_completion_tokens": 1, "stream": True}
-    for attempt in range(retries):
-        headers = {'Authorization': f'Bearer {key.api_key}', 'accept': 'application/json'}
-        if org is not None:
-            headers['OpenAI-Organization'] = org
-        async with session.post(f'{oai_api_url}/chat/completions', headers=headers, json=chat_object) as response:
-            if response.status == 200:
-                return True
-            if response.status == 429:
-                continue
-            if attempt == retries - 1:
-                return False
-            if response.status == 400:
-                data = await response.json()
-                message = data["error"]["message"]
-                if "Your organization must be verified" in message:
-                    return False
-                else:
-                    return True
-            await asyncio.sleep(0.5)
+def order_oai_models(models):
+    candidates = []
+    for model in set(models):
+        family = model_family(model)
+        if model in RETIRED_MODELS or family in RETIRED_MODELS:
+            continue
+        if not re.match(r"^(gpt-\d|o[1-9](?:-|$)|chatgpt-)", family):
+            continue
+        if any(part in family for part in (
+            "audio", "realtime", "transcribe", "tts", "search", "image",
+            "instruct", "deep-research", "-pro", "-base", "-preview",
+        )):
+            continue
+        candidates.append(model)
+
+    def rank(model):
+        family = model_family(model)
+        if family in MODEL_PREFERENCE:
+            priority = MODEL_PREFERENCE.index(family)
+        else:
+            priority = len(MODEL_PREFERENCE) + (
+                0 if any(part in family for part in ("nano", "mini", "luna")) else 1
+            )
+        return model.startswith("ft:"), priority, model != family, model
+
+    return sorted(candidates, key=rank)
+
+
+def safe_int(value):
+    try:
+        number = int(value)
+        return number if number >= 0 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def redact_error(value, secret):
+    return re.sub(r"sk-[A-Za-z0-9_.*-]+", "[REDACTED]", str(value).replace(secret, "[REDACTED]"))[:600]
+
+
+def error_fields(payload):
+    error = payload.get("error")
+    return error if isinstance(error, dict) else {}
+
+
+def billing_error(payload):
+    error = error_fields(payload)
+    code, kind = error.get("code"), error.get("type")
+    if isinstance(code, str) and code in BILLING_CODES:
+        return code
+    if isinstance(kind, str) and kind in BILLING_CODES:
+        return kind
+    return ""
+
+
+def retry_delay(headers, attempt):
+    value = headers.get("retry-after")
+    if value is not None:
+        try:
+            delay = float(value)
+        except (TypeError, ValueError):
+            try:
+                date = parsedate_to_datetime(value)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=timezone.utc)
+                delay = (date - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                delay = -1
+        if math.isfinite(delay) and delay >= 0:
+            # Never shorten a server delay. A long delay defers this check.
+            return delay if delay <= MAX_RETRY_DELAY else None
+    return min(0.5 * 2 ** attempt + random.uniform(0, 0.25), MAX_RETRY_DELAY)
+
+
+async def request_json(session, method, path, key, retries=3, org=None, payload=None, timeout=20):
+    headers = {"Authorization": f"Bearer {key.api_key}", "Accept": "application/json"}
+    if org:
+        headers["OpenAI-Organization"] = org
+    attempts = max(1, min(retries, 3))
+    waited = 0
+    for attempt in range(attempts):
+        try:
+            kwargs = {
+                "headers": headers,
+                "timeout": aiohttp.ClientTimeout(total=timeout, connect=min(timeout, 10)),
+                "allow_redirects": False,
+            }
+            if payload is not None:
+                kwargs["json"] = payload
+            request = session.get if method == "GET" else session.post
+            async with request(f"{oai_api_url}/{path}", **kwargs) as response:
+                status = response.status
+                response_headers = {k.lower(): v for k, v in response.headers.items()}
+                try:
+                    data = await response.json(content_type=None)
+                except (TypeError, ValueError):
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            status, response_headers = 0, {}
+            data = {"error": {"type": "network_error", "code": type(exc).__name__,
+                              "message": "Request could not be completed; retry the check later."}}
+            # A POST may have been billed before the connection was lost.
+            if method != "GET":
+                return status, data, response_headers
+        transient = status in (0, 408, 409, 429) or 500 <= status <= 599
+        if not transient or billing_error(data) or attempt + 1 == attempts:
+            return status, data, response_headers
+        delay = retry_delay(response_headers, attempt)
+        if delay is None or waited + delay > MAX_RETRY_WAIT:
+            return status, data, response_headers
+        await asyncio.sleep(delay)
+        waited += delay
+    return status, data, response_headers
+
+
+def capture_response(key, payload, headers):
+    error = error_fields(payload)
+    key.error_type = str(error.get("type") or "")
+    key.error_code = str(error.get("code") or "")
+    key.error_message = redact_error(error.get("message") or "", key.api_key)
+    key.request_id = str(headers.get("x-request-id") or "")
+    key.retry_after = str(headers.get("retry-after") or "")
+    for header, attr in (
+        ("x-ratelimit-limit-requests", "rpm"),
+        ("x-ratelimit-limit-tokens", "tpm"),
+        ("x-ratelimit-remaining-requests", "requests_remaining"),
+        ("x-ratelimit-remaining-tokens", "tokens_remaining"),
+    ):
+        setattr(key, attr, safe_int(headers.get(header)))
+    key.requests_reset = str(headers.get("x-ratelimit-reset-requests") or "")
+    key.tokens_reset = str(headers.get("x-ratelimit-reset-tokens") or "")
+    if not key.default_org and headers.get("openai-organization"):
+        key.default_org = headers["openai-organization"]
+
+
+def apply_error(key, status, payload):
+    """None = invalid credentials; False = inconclusive; True = known billing block."""
+    key.has_quota = None
+    billing = billing_error(payload)
+    if billing:
+        key.validation_status = "valid"
+        key.has_quota = False
+        key.quota_status = billing
+        return True
+    message = key.error_message.lower()
+    if (key.error_code in BLOCK_CODES or key.error_type in BLOCK_CODES
+            or "ip allowlist" in message or "ip address is not" in message):
+        key.blocked = True
+        key.quota_status = "access_blocked"
+        if key.validation_status != "valid":
+            key.validation_status = "restricted"
+        return False
+    if status == 401:
+        context_error = any(part in message for part in (
+            "missing scopes", "insufficient permissions", "organization", "project",
+            "not authorized", "ip address",
+        )) and key.error_code != "invalid_api_key"
+        if not context_error:
+            key.validation_status = "invalid"
+            key.quota_status = "invalid_key"
+            return None
+    if status in (401, 403):
+        key.permission_restricted = True
+        key.quota_status = "permission_restricted"
+        if key.validation_status != "valid":
+            key.validation_status = "restricted"
+    elif status == 429:
+        key.rate_limited = True
+        key.quota_status = "rate_limited"
+    elif status == 0:
+        key.quota_status = "network_error"
+    elif status >= 500:
+        key.quota_status = "api_error"
+    elif status == 404:
+        key.quota_status = "no_usable_model"
+    else:
+        key.quota_status = "probe_error"
     return False
 
 
-# this will weed out fake t4/t5 keys reporting a 10k rpm limit, those keys would have requested to have their rpm increased
-unknown = "Tier Unknown (strange or absent token limit in header)"
-async def get_oai_key_tier(tpm, model_name):
-    if not isinstance(tpm, int):
-        return unknown
+async def get_oai_model(key, session, retries=3, org=None):
+    status, data, headers = await request_json(session, "GET", "models", key, retries, org)
+    capture_response(key, data, headers)
+    if status == 200:
+        if not isinstance(data.get("data"), list):
+            key.quota_status = "invalid_response"
+            return False
+        key.validation_status = "valid"
+        key.access_to_model_listing = True
+        key.models = sorted({item["id"] for item in data["data"]
+                             if isinstance(item, dict) and isinstance(item.get("id"), str)})
+        key.has_special_models = any(model.startswith("ft:") for model in key.models)
+        candidates = order_oai_models(key.models)
+        key.model = candidates[0] if candidates else ""
+        return True
+    result = apply_error(key, status, data)
+    if status in (401, 403) and key.permission_restricted and not key.blocked:
+        key.access_to_model_listing = False
+        # A restricted key may allow inference while forbidding model listing.
+        return True
+    return result
 
-    fixed_tiers = copy.deepcopy(oai_tiers)
-    if "gpt-5" not in model_name:
-        fixed_tiers['Tier 5']['tpm'] = 30000000
-    for tier_name, tier_data in fixed_tiers.items():
-        if tier_data['tpm'] == tpm:
-            return tier_name
+
+async def get_oai_key_tier(tpm, model_name, rpm=None):
+    limits = MODEL_TIERS.get(model_family(model_name))
+    if limits and rpm is not None and tpm is not None:
+        for tier, pair in enumerate(limits, 1):
+            if pair == (rpm, tpm):
+                return f"Tier {tier} (estimate)"
     return unknown
 
 
-async def get_oai_org(key: APIKey, session, retries):
-    for _ in range(retries):
-        async with session.get(f'{oai_api_url}/me', headers={'Authorization': f'Bearer {key.api_key}'}) as response:
-            if response.status == 200:
-                data = await response.json()
-                orgs = data["orgs"]["data"]
-
-                for org in orgs:
-                    if not org["personal"]:
-                        if org["is_default"]:
-                            key.default_org = org["name"]
-                        key.organizations.append(org["name"])
-                return True
-            elif response.status == 403:
-                key.default_org = None
-                return True
-            elif response.status != 502:
-                return
-        await asyncio.sleep(0.5)
+def successful_probe(path, data):
+    if path == "responses":
+        return (data.get("object") == "response" and data.get("status") in ("completed", "incomplete")
+                and isinstance(data.get("output"), list) and not data.get("error"))
+    choices = data.get("choices")
+    return isinstance(choices, list) and any(
+        isinstance(item, dict) and isinstance(item.get("message"), dict) for item in choices
+    ) and not data.get("error")
 
 
-async def clone_key(key: APIKey, session, retries):
-    cloned_keys = set()
-    if len(key.organizations) <= 0:
+def probe_body(model, path):
+    if path == "responses":
+        return {"model": model, "input": "Reply OK.", "max_output_tokens": 16, "store": False}
+    return {"model": model, "messages": [{"role": "user", "content": "Reply OK."}],
+            "max_completion_tokens": 1, "store": False}
+
+
+async def get_oai_key_attribs(key, session, retries=3, org=None, check_id=False):
+    key.has_quota = None
+    key.rate_limited = False
+    key.permission_restricted = False
+    candidates = order_oai_models(key.models)
+    if not candidates and key.access_to_model_listing is False:
+        candidates = list(MODEL_PREFERENCE[:MAX_MODEL_PROBES])
+    if not candidates and key.model:
+        candidates = order_oai_models([key.model])
+    if not candidates:
+        key.quota_status = "no_suitable_model"
         return False
+    for model in candidates[:MAX_MODEL_PROBES]:
+        key.model = model
+        path = "responses" if "codex" in model else "chat/completions"
+        status, data, headers = await request_json(
+            session, "POST", path, key, retries, org, probe_body(model, path)
+        )
+        # Some text models expose only Responses. Try it only for a specific
+        # endpoint compatibility error, never for billing or transport errors.
+        error = error_fields(data)
+        message = str(error.get("message") or "").lower()
+        if (status in (400, 404) and path == "chat/completions" and not billing_error(data)
+                and ("responses" in message or "not a chat model" in message)):
+            path = "responses"
+            status, data, headers = await request_json(
+                session, "POST", path, key, retries, org, probe_body(model, path)
+            )
+        capture_response(key, data, headers)
+        key.tier = await get_oai_key_tier(key.tpm, model, key.rpm)
+        key.tier_reason = (
+            "published limits match; project/custom limits can differ"
+            if key.tier != unknown else "model-specific or custom limits; account tier cannot be inferred"
+        )
+        if status == 200:
+            if not successful_probe(path, data):
+                key.quota_status = "invalid_response"
+                return False
+            key.validation_status = "valid"
+            key.has_quota = True
+            key.quota_status = "available"
+            key.permission_restricted = False
+            key.rate_limited = False
+            key.blocked = False
+            usage = data.get("usage") or {}
+            if isinstance(usage, dict):
+                key.input_tokens_used = safe_int(usage.get("prompt_tokens", usage.get("input_tokens"))) or 0
+                key.output_tokens_used = safe_int(usage.get("completion_tokens", usage.get("output_tokens"))) or 0
+                key.usage_tokens = safe_int(usage.get("total_tokens")) or key.input_tokens_used + key.output_tokens_used
+            if check_id:
+                key.id_verified = await check_id_verified(key, session, retries, org)
+            return True
+        result = apply_error(key, status, data)
+        if result is None or result is True or key.blocked:
+            return result
+        # A missing or disallowed model does not invalidate the credential.
+        if status == 404 or (status == 403 and key.error_code in ("model_not_found", "model_not_allowed")):
+            continue
+        return result
+    return False
+
+
+async def check_id_verified(key, session, retries=3, org=None):
+    """Compatibility flag: o3 access is observable; identity verification isn't."""
+    status, data, _ = await request_json(
+        session, "POST", "chat/completions", key, retries, org, probe_body("o3", "chat/completions")
+    )
+    message = str(error_fields(data).get("message") or "").lower()
+    if status in (400, 403) and "organization must be verified" in message:
+        key.org_verification_status = "verification_required"
+        return False
+    if status == 200 and successful_probe("chat/completions", data):
+        key.org_verification_status = "o3_access_confirmed"
+    else:
+        key.org_verification_status = "unknown"
+    return None
+
+
+async def get_oai_org(key, session, retries=1):
+    """Best-effort metadata: /me is legacy and must never gate validation."""
+    status, data, _ = await request_json(session, "GET", "me", key, 1, timeout=5)
+    orgs = data.get("orgs")
+    if status != 200 or not isinstance(orgs, dict) or not isinstance(orgs.get("data"), list):
+        key.org_metadata_status = "unavailable"
+        return False
+    key.org_metadata_status = "available"
+    for org in orgs["data"]:
+        if not isinstance(org, dict) or not isinstance(org.get("id"), str) or not org["id"]:
+            continue
+        org_id = org["id"]
+        if org_id not in key.organizations:
+            key.organizations.append(org_id)
+        key.organization_names[org_id] = str(org.get("name") or org_id)
+        if org.get("is_default"):
+            key.default_org = org_id
+    return True
+
+
+async def check_openai(key, session, retries=3, check_id=False, org=None, check_orgs=True):
+    # Reset per-run observations; repeated checks must not retain old quota.
+    fresh = APIKey(key.provider, key.api_key)
+    key.__dict__.update(fresh.__dict__)
+    if org:
+        key.default_org = org
+    result = await get_oai_model(key, session, retries, org)
+    if result is None:
+        return None
+    if result and key.has_quota is None:
+        result = await get_oai_key_attribs(key, session, retries, org, check_id)
+    if check_orgs and key.validation_status == "valid":
+        await get_oai_org(key, session)
+    return result
+
+
+async def clone_key(key, session, retries=3, check_id=False):
+    """Only legacy user keys can select other organizations."""
+    cloned_keys = set()
+    if key.api_key.startswith(("sk-proj-", "sk-svcacct-")) or not key.default_org:
+        return cloned_keys
     for org in key.organizations:
         if org == key.default_org:
             continue
-        new_key = key.clone()
-        new_key.default_org = org
-        results = await asyncio.gather(get_oai_model(new_key, session, retries, org), get_oai_key_attribs(new_key, session, retries, org))
-        model_result, attribs_result = results
-        if model_result is not None and attribs_result is not None:
+        new_key = APIKey(key.provider, key.api_key)
+        await check_openai(new_key, session, retries, check_id, org, check_orgs=False)
+        if openai_key_usable(new_key):
+            new_key.organization_names = dict(key.organization_names)
             cloned_keys.add(new_key)
     return cloned_keys
 
 
-def check_manual_increase(key: APIKey):
-    fixed_tiers = copy.deepcopy(oai_tiers)
-    if "gpt-5" not in key.model:
-        fixed_tiers['Tier 5']['rpm'] = 10000
-    if key.tier in fixed_tiers:
-        standard_rpm = fixed_tiers[key.tier]['rpm']
-        return key.rpm > standard_rpm
-    return False
+def openai_key_usable(key):
+    return (key.validation_status == "valid" and key.has_quota is True
+            and not key.rate_limited and not key.permission_restricted and not key.blocked)
 
 
-def format_key_details(key: APIKey):
-    details = [key.api_key]
-    if key.access_to_model_listing is False:
-        details.append("no access to /models endpoint")
-    if len(key.missing_models) > 0 and not key.slop and key.has_quota:
-        details.append(f"!!!WARNING!!! key doesn't have access to models: {key.missing_models}")
+def openai_status_text(key):
+    labels = {
+        "available": "usable quota (inference confirmed)",
+        "insufficient_quota": "quota exhausted",
+        "credit_balance_exhausted": "credit balance exhausted",
+        "billing_not_active": "billing inactive",
+        "billing_hard_limit_reached": "billing limit reached",
+        "organization_spend_limit_exceeded": "organization spend limit reached",
+        "project_spend_limit_exceeded": "project spend limit reached",
+        "organization_usage_limit_exceeded": "organization usage limit reached",
+        "rate_limited": "temporary rate limit; quota unknown",
+        "permission_restricted": "permission restricted; quota unknown",
+        "access_blocked": "access blocked; quota unknown",
+        "network_error": "network error; retry later",
+        "api_error": "temporary API error; retry later",
+        "probe_error": "probe failed; quota unknown",
+        "invalid_response": "unexpected API response; quota unknown",
+        "no_usable_model": "tested models unavailable; quota unknown",
+        "no_suitable_model": "no suitable text model for a small probe; quota unknown",
+    }
+    return labels.get(key.quota_status, key.quota_status)
+
+
+def format_key_details(key):
+    details = [key.api_key, openai_status_text(key)]
+    if key.model:
+        details.append(f"model: {key.model}")
+    if key.rpm is not None:
+        details.append(f"{key.rpm:,} RPM")
+    if key.tpm is not None:
+        details.append(f"{key.tpm:,} TPM")
+    if key.has_quota is True:
+        details.append(key.tier or unknown)
+        if key.tier == unknown:
+            details.append(key.tier_reason)
+    if key.requests_remaining is not None:
+        details.append(f"requests remaining: {key.requests_remaining:,}")
+    if key.tokens_remaining is not None:
+        details.append(f"tokens remaining: {key.tokens_remaining:,}")
+    if key.retry_after:
+        details.append(f"Retry-After: {key.retry_after}")
     if key.default_org:
-        details.append(f"default org - {key.default_org}")
-    other_orgs = [org for org in key.organizations if org != key.default_org]
-    if other_orgs:
-        details.append(f"other orgs - {other_orgs}")
-    if key.has_quota:
-        details.append(f"{key.rpm} RPM")
-        if check_manual_increase(key):
-            details.append("(RPM increased via request)")
-    if key.the_one:
-        details.append(f"!!!god key!!!")
-    if key.real_32k:
-        details.append(f"!!!32k key!!!")
+        details.append(f"org: {key.default_org}")
+    if key.access_to_model_listing is False:
+        details.append("model listing restricted")
+    if key.org_metadata_status == "unavailable":
+        details.append("organization metadata unavailable")
     if key.has_special_models:
-        details.append("key has finetuned models")
-    if key.extra_models:
-        details.append(f"key has access to non-standard models: {', '.join(key.extra_model_list)}")
-    if key.id_verified:
-        details.append("id verified")
-
+        details.append("fine-tuned models listed")
+    if key.org_verification_status != "not_checked":
+        details.append({
+            "o3_access_confirmed": "o3 access confirmed; identity verification not exposed by API",
+            "verification_required": "organization verification required",
+            "unknown": "organization verification unknown",
+        }[key.org_verification_status])
+    if key.usage_tokens:
+        details.append(f"probe usage: {key.input_tokens_used} input + {key.output_tokens_used} output tokens")
+    if key.has_quota is not True and key.error_code:
+        details.append(f"error: {key.error_code}")
+    if key.has_quota is None and key.error_message:
+        details.append(key.error_message.replace("\n", " "))
     return " | ".join(details)
 
-def pretty_print_oai_keys(keys, cloned_keys):
-    print('-' * 90)
 
-    group = {
-        "quota": {},
-        "no_quota": [],
-        "slop": []
+def pretty_print_oai_keys(keys, cloned_keys=()):
+    print("-" * 90)
+    groups = {
+        "Usable quota (inference confirmed)": [],
+        "Valid keys with billing/quota exhausted": [],
+        "Authenticated keys; quota not confirmed": [],
+        "Unconfirmed or restricted keys; retry/check access": [],
     }
-
     for key in keys:
-        if key.slop:
-            group["slop"].append(key)
-        elif key.has_quota:
-            if key.tier not in group["quota"]:
-                group["quota"][key.tier] = []
-            group["quota"][key.tier].append(key)
+        if openai_key_usable(key):
+            group = "Usable quota (inference confirmed)"
+        elif key.validation_status == "valid" and key.has_quota is False:
+            group = "Valid keys with billing/quota exhausted"
+        elif key.validation_status == "valid":
+            group = "Authenticated keys; quota not confirmed"
         else:
-            group["no_quota"].append(key)
-
-    quota_keys_by_tier = group["quota"]
-    stats = {
-        "quota_count": sum(len(tier_keys) for tier_keys in quota_keys_by_tier.values()),
-        "no_quota_count": len(group["no_quota"]),
-        "slop_count": len(group["slop"]),
-        "org_count": sum(1 for k in keys if k.organizations),
-        "verified_org_count": sum(1 for k in keys if k.id_verified),
-        "t5_count": len(quota_keys_by_tier.get('Tier 5', []))
-    }
-
-    if stats["quota_count"] > 0:
-        print(f"\n--- Verified {stats['quota_count']} OpenAI keys with quota ---")
-        for tier_name in reversed(oai_tiers.keys()):
-            if tier_name in quota_keys_by_tier:
-                print(f"\nFound {len(quota_keys_by_tier[tier_name])} keys in {tier_name}:")
-                for key in quota_keys_by_tier[tier_name]:
-                    print(format_key_details(key))
-
-        if unknown in quota_keys_by_tier:
-            print(f"\nFound {len(quota_keys_by_tier[unknown])} keys of {unknown}:")
-            for key in quota_keys_by_tier[unknown]:
+            group = "Unconfirmed or restricted keys; retry/check access"
+        groups[group].append(key)
+    for label, items in groups.items():
+        if items:
+            print(f"\n--- OpenAI: {label}: {len(items)} ---")
+            for key in sorted(items, key=lambda k: (k.api_key, k.default_org)):
                 print(format_key_details(key))
-
-    if stats["no_quota_count"] > 0:
-        print(f"\n--- Verified {stats['no_quota_count']} OpenAI keys with no quota ---")
-        for key in group["no_quota"]:
-            print(format_key_details(key))
-
-    if stats["slop_count"] > 0:
-        print(f"\n--- Verified {stats['slop_count']} OpenAI keys that are slop (no access to useful models or on free tier) ---")
-        for key in group["slop"]:
-            print(format_key_details(key))
-
+    confirmed = sum(key.validation_status == "valid" for key in keys)
+    usable = sum(openai_key_usable(key) for key in keys)
+    print(f"\n--- OpenAI: {confirmed} authenticated, {usable} with usable quota, "
+          f"{len(keys) - confirmed} unconfirmed/restricted ---")
+    if any(key.has_quota is True for key in keys):
+        print("Tier estimates compare this model's RPM/TPM with published defaults; "
+              "the account tier is not exposed by these endpoints.")
     if cloned_keys:
-        print(f'\n--- Cloned {len(cloned_keys)} keys due to finding alternative orgs that could prompt ---')
-    summary = f'\n--- Total Valid OpenAI Keys: {len(keys)} ' + f'({stats["quota_count"]} in quota, {stats["no_quota_count"]} no quota, {stats["slop_count"]} slop, {stats["org_count"]} orgs'
-    if running_org_verify:
-        summary += f' - {stats["verified_org_count"]} with id verified'
-    summary += f', {stats["t5_count"]} Tier 5) ---\n'
-    print(summary)
+        print(f"Additional organization contexts with confirmed inference: {len(cloned_keys)}")

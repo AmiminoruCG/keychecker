@@ -1,1 +1,6 @@
 /key_snapshots.txt
+/.key_snapshots.txt.*
+
+# Python bytecode is generated locally.
+__pycache__/
+*.py[cod]
