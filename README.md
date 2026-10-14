@@ -20,6 +20,32 @@ Currently supports and validates keys for the services below, and checks for the
 - Moonshot - (Balance status, model access, kimi-k2.6 access)
 
 # Usage:
+
+On a Linux server, launch with:
+
+```bash
+./run.sh
+./run.sh -file keys.txt -nooutput
+./run.sh --help
+```
+
+`run.sh` creates `.venv` next to the script and checks the versions and dependencies in `requirements.txt`. Missing or incompatible Python packages are installed there. Subsequent launches use an offline dependency check and keep compatible installed packages. Installation messages go to stderr so they do not mix with the checker's stdout.
+
+Python 3.9+ is required; the launcher prefers an installed Python 3.12/3.11 for compatibility with the current dependency versions. If Python or its venv support is absent, it can install the OS packages using apt-get, dnf, yum or apk (root or sudo is needed only for that step). The first package installation needs access to your Python package index. An existing virtual environment is reused and never deleted automatically.
+
+All arguments are forwarded unchanged. You can invoke the script by absolute path from another directory; relative `-file` paths and `key_snapshots.txt` refer to your current directory. If a file transfer loses the executable permission, use `bash run.sh` or `chmod +x run.sh`.
+
+Optional environment settings:
+
+```bash
+# Used when creating a new virtual environment:
+KEYCHECKER_PYTHON=/usr/bin/python3.12 ./run.sh
+# Reuse or create an environment in another location:
+KEYCHECKER_VENV="$HOME/.venvs/keychecker" ./run.sh -file keys.txt
+```
+
+For manual installation (including Windows):
+
 `pip install -r requirements.txt`
 
 `python main.py`
