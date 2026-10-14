@@ -8,7 +8,7 @@ from AWS import check_aws, pretty_print_aws_keys
 from Azure import check_azure, pretty_print_azure_keys
 from VertexAI import check_vertexai, pretty_print_vertexai_keys
 from Mistral import check_mistral, pretty_print_mistral_keys
-from OpenRouter import check_openrouter, pretty_print_openrouter_keys
+from OpenRouter import check_openrouter, openrouter_status_text, pretty_print_openrouter_keys
 from ElevenLabs import check_elevenlabs, pretty_print_elevenlabs_keys
 from XAI import check_xai, pretty_print_xai_keys
 from Perplexity import check_perplexity, pretty_print_perplexity_keys
@@ -131,7 +131,7 @@ async def validate_openrouter(key: APIKey, sem):
         if await check_openrouter(key, session) is None:
             IO.conditional_print(f"Invalid OpenRouter key: {key.api_key}", args.verbose)
             return
-        IO.conditional_print(f"OpenRouter key '{key.api_key}' is valid", args.verbose)
+        IO.conditional_print(f"OpenRouter key '{key.api_key}': {openrouter_status_text(key)}", args.verbose)
         api_keys.add(key)
 
 

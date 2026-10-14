@@ -91,21 +91,29 @@ class APIKey:
             self.tier = ""
 
         elif provider == Provider.OPENROUTER:
-            self.usage = 0
-            self.usage_daily = 0
-            self.usage_weekly = 0
-            self.usage_monthly = 0
-            self.credit_limit = 0
+            self.validation_status = "unknown"
+            self.validation_message = "not checked"
+            self.usage = None
+            self.usage_daily = None
+            self.usage_weekly = None
+            self.usage_monthly = None
+            self.credit_limit = None
+            self.key_limit_known = False
             self.limit_remaining = None
             self.limit_reset = None
+            self.limit_reset_known = False
+            self.include_byok_in_limit = None
+            self.is_management_key = None
             self.account_balance = None
             self.total_credits = None
             self.total_usage = None
             self.rpm = 0
-            self.balance = 0
+            self.balance = None
             self.limit_reached = False
-            self.bought_credits = False
+            self.bought_credits = None
             self.credits_api_available = False
+            self.credits_api_status = "not_checked"
+            self.credits_api_http_status = None
 
         elif provider == Provider.ELEVENLABS:
             self.characters_left = 0
